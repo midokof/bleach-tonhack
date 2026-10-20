@@ -77,7 +77,7 @@ static uintptr_t th_base(void) {
             if (name && strstr(name, "UnityFramework")) {
                 const struct mach_header *h = _dyld_get_image_header(i);
                 if (h) {
-                    b = (uintptr_t)h + _dyld_get_image_vmaddr_slide(h);
+                    b = (uintptr_t)h + _dyld_get_image_vmaddr_slide(i);
                     TH_log("UnityFramework base = %p (%s)", (void *)b, name);
                     return b;
                 }
