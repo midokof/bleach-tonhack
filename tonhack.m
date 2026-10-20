@@ -152,10 +152,10 @@ static fn_void      real_UpdateHp;
 static fn_setInt    real_setHP, real_setHPMax, real_setDefence, real_setAttack;
 
 // call a hook chain if it exists, otherwise the real function
-#define CHAIN_SET(fn)   ((fn) ? (fn)   : real_set##fn)
-#define CHAIN_GET(fn)   ((fn) ? (fn)   : real_get##fn)
-#define CHAIN_GETB(fn)  ((fn) ? (fn)   : real_get##fn)
-#define CHAIN_VOID(fn)  ((fn) ? (fn)   : real_##fn)
+#define CHAIN_SET(fn)   ((orig_##fn) ? (orig_##fn) : real_##fn)
+#define CHAIN_GET(fn)   ((orig_##fn) ? (orig_##fn) : real_##fn)
+#define CHAIN_GETB(fn)  ((orig_##fn) ? (orig_##fn) : real_##fn)
+#define CHAIN_VOID(fn)  ((orig_##fn) ? (orig_##fn) : real_##fn)
 
 // trampolines (after patching) -- may be NULL if a hook was refused
 static fn_getIndex orig_getIndex;
