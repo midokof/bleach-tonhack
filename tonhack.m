@@ -71,10 +71,19 @@ static void TH_log(const char *fmt, ...) {
 static uintptr_t th_base(void) {
     static uintptr_t b = 0;
     if (!b) {
-        const struct mach_header *h = _dyld_get_image_header("UnityFramework");
-        if (!h) return 0;
-        b = (uintptr_t)h + _dyld_get_image_vmaddr_slide(h);
-        TH_log("UnityFramework base = %p", (void *)b);
+        uint32_t n = _dyld_image_count();
+        for (uint32_t i = 0; i < n; i++) {
+            const char *name = _dyld_get_image_name(i);
+            if (name && strstr(name, "UnityFramework")) {
+                const struct mach_header *h = _dyld_get_image_header(i);
+                if (h) {
+                    b = (uintptr_t)h + _dyld_get_image_vmaddr_slide(h);
+                    TH_log("UnityFramework base = %p (%s)", (void *)b, name);
+                    return b;
+                }
+            }
+        }
+        TH_log("UnityFramework not found among %u images", n);
     }
     return b;
 }
