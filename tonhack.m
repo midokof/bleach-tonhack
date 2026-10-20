@@ -99,7 +99,7 @@ static void th_make_stub(void *replacement, uint8_t *m) {
     uint32_t hdr[2] = { 0x58000050u, 0xD61F0200u };
     memcpy(m, hdr, 8);
     memcpy(m + 8, &replacement, 8);
-    __builtin___clear_cache((char *)m, (char *)m + 16);
+    extern void sys_icache_invalidate(void*, unsigned long); sys_icache_invalidate((void*)m, 16);
 }
 
 static void th_make_tramp(void *target, uint8_t *out) {
@@ -117,7 +117,7 @@ static void th_make_tramp(void *target, uint8_t *out) {
     memcpy(out + 16, &saved[3],  4);
     memcpy(out + 20, &br,        4);
     memcpy(out + 24, &bk,        8);
-    __builtin___clear_cache((char *)out, (char *)out + 32);
+    extern void sys_icache_invalidate(void*, unsigned long); sys_icache_invalidate((void*)out, 32);
 }
 
 // Returns 0 on success, -2 if the target doesn't look like a function.
@@ -140,7 +140,7 @@ static int th_hook(void *target, void *replacement, void **out_tramp) {
     uint8_t stub[16];
     th_make_stub(replacement, stub);
     memcpy((void *)target, stub, 16);
-    __builtin___clear_cache((char *)target, (char *)target + 16);
+    extern void sys_icache_invalidate(void*, unsigned long); sys_icache_invalidate((void*)target, 16);
     if (out_tramp) *out_tramp = tr;
     return 0;
 }
