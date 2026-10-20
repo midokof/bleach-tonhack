@@ -17,12 +17,12 @@
 // No server. No encrypted config. No memory scanning. Named IL2CPP methods.
 // ------------------------------------------------------------------ config
 
-#define GOD_MODE              1
-#define ONE_HIT_KILL          1
-#define INVULNERABLE_DEFENCE  1
-#define MAX_ATTACK            1
-#define NO_REVIVAL            1
-#define NO_HEAVY_ATTACK_LOCK  1
+#define GOD_MODE              0
+#define ONE_HIT_KILL          0
+#define INVULNERABLE_DEFENCE  0
+#define MAX_ATTACK            0
+#define NO_REVIVAL            0
+#define NO_HEAVY_ATTACK_LOCK  0
 
 // Roster index of the player. 0 is normally the leader. If the wrong character
 // turns unkillable, keep TH_LOG at 1 and read the log line for each status:
@@ -303,7 +303,12 @@ static int g_installed = 0;
 static void th_install(void) {
     if (g_installed) return;
     if (!th_base()) { TH_log("UnityFramework not mapped yet"); return; }
-
+#if !(GOD_MODE || ONE_HIT_KILL || INVULNERABLE_DEFENCE || MAX_ATTACK || NO_REVIVAL || NO_HEAVY_ATTACK_LOCK)
+    // No IL2CPP hooks requested: only seed NSUserDefaults switches.
+    g_installed = 1;
+    TH_log("installed (switch seeding only)");
+    return;
+#endif
     real_getIndex         = (fn_getIndex)VA(RVA_get_Index);
     real_getHP            = (fn_getInt)   VA(RVA_get_HP);
     real_getHPMax         = (fn_getInt)   VA(RVA_get_HPMax);
