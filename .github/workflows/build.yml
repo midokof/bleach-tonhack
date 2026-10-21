@@ -15,13 +15,14 @@ jobs:
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
           echo "SDK=$SDK"
           clang -dynamiclib -arch arm64 -miphoneos-version-min=12.0 \
-            -isysroot "$SDK" \
+            -isysroot "$SDK" -Wall -Wno-unused-function \
             -framework Foundation -framework UIKit \
             -o tonhack.dylib tonhack.m -lobjc
           codesign -s - -f tonhack.dylib
           codesign -dv tonhack.dylib 2>&1 | head
           file tonhack.dylib
           ls -la tonhack.dylib
+          otool -l tonhack.dylib | grep -A2 LC_ID_DYLIB | head
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
