@@ -1,13 +1,13 @@
-// tonhack.m — offline IL2CPP cheat for BLEACH (com.klab.bleach) 18.1.1
+// tonhack.m — offline IL2CPP cheat + VIP unlock for BLEACH (com.klab.bleach) 18.1.1
 //
 // Build (on a Mac, arm64):
 //   clang -dynamiclib -arch arm64 -miphoneos-version-min=12.0 \
 //         -framework Foundation -framework UIKit -framework MachO \
 //         -o tonhack.dylib tonhack.m -lobjc
 //
-// Install: drop into Payload/Bleach.app/Frameworks/ and add to UnityFramework:
+// Install: drop into Payload/Bleach.app/Frameworks/ and load it from
+// UnityFramework with:
 //   LC_LOAD_DYLIB @executable_path/Frameworks/tonhack.dylib
-//   LC_RPATH    @executable_path/Frameworks
 //
 // RVAs from Il2CppDumper v6.7.46 on
 //   Payload/Bleach.app/Frameworks/UnityFramework.framework/UnityFramework
@@ -57,6 +57,11 @@
 #include <mach-o/dyld.h>
 #include <objc/runtime.h>
 #include <dispatch/dispatch.h>
+#include <dispatch/qos.h>
+
+// libSystem export; declared here because <libkern/OSCacheControl.h> is not
+// guaranteed to be present in every SDK slice.
+extern void sys_icache_invalidate(void *address, unsigned long size);
 
 static void TH_log(const char *fmt, ...) {
     if (!TH_LOG) return;
@@ -99,7 +104,7 @@ static void th_make_stub(void *replacement, uint8_t *m) {
     uint32_t hdr[2] = { 0x58000050u, 0xD61F0200u };
     memcpy(m, hdr, 8);
     memcpy(m + 8, &replacement, 8);
-    extern void sys_icache_invalidate(void*, unsigned long); sys_icache_invalidate((void*)m, 16);
+    sys_icache_invalidate((void *)m, 16);
 }
 
 static void th_make_tramp(void *target, uint8_t *out) {
@@ -117,7 +122,7 @@ static void th_make_tramp(void *target, uint8_t *out) {
     memcpy(out + 16, &saved[3],  4);
     memcpy(out + 20, &br,        4);
     memcpy(out + 24, &bk,        8);
-    extern void sys_icache_invalidate(void*, unsigned long); sys_icache_invalidate((void*)out, 32);
+    sys_icache_invalidate((void *)out, 32);
 }
 
 // Returns 0 on success, -2 if the target doesn't look like a function.
@@ -140,7 +145,7 @@ static int th_hook(void *target, void *replacement, void **out_tramp) {
     uint8_t stub[16];
     th_make_stub(replacement, stub);
     memcpy((void *)target, stub, 16);
-    extern void sys_icache_invalidate(void*, unsigned long); sys_icache_invalidate((void*)target, 16);
+    sys_icache_invalidate((void *)target, 16);
     if (out_tramp) *out_tramp = tr;
     return 0;
 }
@@ -238,62 +243,255 @@ static uint8_t h_getForbiddenHeavy(void *self) {
     return CHAIN_GETB(getForbiddenHeavy)(self);
 }
 
-// ---------------------------------------------------- UserDefaults seeding
+// ===================================================================
+//                    VIP unlock  --  NSUserDefaults layer
+// ===================================================================
 //
-// Confirmed from an iMazing container dump of com.klab.bleach 18.1.1
+// The iOSGods tweak (libbleachbravesoul.dylib) stores its cheat flags as
+// plain booleans in the host app's own NSUserDefaults domain
 // (Library/Preferences/com.klab.bleach.<suffix>.plist):
 //
-//  * "keyGodMode-switch" ... 9 named booleans, all False
-//  * "N-switch" for N in {1..14, 20..27, 32,33,35,36,37} -- 27 booleans,
-//    of which EXACTLY 3 were True (2, 3 and 4) and 24 False.
+//   * "keyGodMode-switch" ... 9 named booleans, all False
+//   * "N-switch" for N in {1..14, 20..27, 32,33,35,36,37} -- 27 booleans,
+//     of which EXACTLY 3 were True (2, 3 and 4) and 24 False.
 //
-// Three enabled out of 27 is the "max active cheats" cap, persisted as plain
-// booleans in the app's own NSUserDefaults. Nothing on the write path consults
-// the server, so writing them to YES from inside the process enables
-// everything without ever going through the toggle handler.
+// Three enabled out of 27 is the "max active cheats" cap. The key names are
+// built by the tweak with the format string "%@-switch", so every switch key
+// ends in "-switch".
+//
+// Two layers are used, because either one alone can be bypassed:
+//
+//  1. PERSISTENCE. Every "-switch" key is written YES. The write path of the
+//     toggle handler is what enforces the cap, so writing directly from
+//     inside the process never goes through it. The plist therefore ends up
+//     with every feature enabled.
+//
+//  2. RUNTIME. -[NSUserDefaults boolForKey:] / objectForKey: / setBool:forKey:
+//     / setObject:forKey: are swizzled so that a "-switch" key can never be
+//     read as NO and can never be written as NO. This holds even if the tweak
+//     re-reads the flags later, resets them at launch, or re-applies its own
+//     "max 3" rule from inside its handler.
+//
+// The swizzle is installed from this dylib's constructor, which runs before
+// the tweak's own constructor when this dylib is loaded from UnityFramework
+// ahead of libbleachbravesoul.dylib.
 //
 // Verified empirically -- sideload, run, pull the container again and confirm
 // more than 3 come back True.
 
 #include <objc/message.h>
+#include <objc/runtime.h>
 
 #define SEED_SWITCHES 1
-#define SEED_RANGE_FROM 1
-#define SEED_RANGE_TO   37      // covers the gaps (15-19, 28-31, 34) harmlessly
 
-static void th_seed_switches(int round) {
-    Class dfltCls = objc_getClass("NSUserDefaults");
-    if (!dfltCls) return;
-    SEL selStd  = sel_registerName("standardUserDefaults");
-    SEL selSet  = sel_registerName("setBool:forKey:");
-    SEL selSync = sel_registerName("synchronize");
+static void TH_seed_switches(int round);
 
-    id  (*std)(id, SEL)             = (id  (*)(id, SEL))objc_msgSend;
-    void (*setB)(id, SEL, BOOL, id) = (void (*)(id, SEL, BOOL, id))objc_msgSend;
-    BOOL (*sync)(id, SEL)           = (BOOL (*)(id, SEL))objc_msgSend;
+// The 9 named cheat switches (from the tweak's binary string table).
+static const char *TH_NAMED_SWITCHES[9] = {
+    "keyOneHitKill-switch",  "keyGodMode-switch",     "keyKillAll-switch",
+    "keyFreezeEnemy-switch", "keyCoopMoveSpeed-switch",
+    "keyCoopNoHeavyCooldown-switch", "keyCoopNoExtraCooldown-switch",
+    "keyCoopComboDamage-switch", "keyCoopHealMultiplier-switch",
+};
 
-    id d = std((id)dfltCls, selStd);
-    if (!d) return;
+// Notification the tweak posts when a switch is toggled (from its binary
+// string table). Re-posting it after a write makes the tweak re-apply the
+// flags even if it only listens for its own event.
+#define TH_TOGGLE_NOTIFICATION "kItemSwitchToggled"
 
-    // the 9 named cheat switches
-    const char *named[9] = {
-        "keyOneHitKill-switch",  "keyGodMode-switch",     "keyKillAll-switch",
-        "keyFreezeEnemy-switch", "keyCoopMoveSpeed-switch",
-        "keyCoopNoHeavyCooldown-switch", "keyCoopNoExtraCooldown-switch",
-        "keyCoopComboDamage-switch", "keyCoopHealMultiplier-switch",
+static BOOL TH_is_switch_key(id key) {
+    if (!key) return NO;
+    if (![key isKindOfClass:[NSString class]]) return NO;
+    return [(NSString *)key hasSuffix:@"-switch"];
+}
+
+// Original implementations, captured before the swizzle is installed.
+static IMP g_origBoolForKey   = NULL;
+static IMP g_origObjectForKey = NULL;
+static IMP g_origSetBool      = NULL;
+static IMP g_origSetObject    = NULL;
+
+static BOOL TH_sw_boolForKey(id self, SEL _cmd, NSString *key) {
+    if (TH_is_switch_key(key)) return YES;
+    return ((BOOL (*)(id, SEL, NSString *))g_origBoolForKey)(self, _cmd, key);
+}
+
+static id TH_sw_objectForKey(id self, SEL _cmd, NSString *key) {
+    id v = ((id (*)(id, SEL, NSString *))g_origObjectForKey)(self, _cmd, key);
+    if (TH_is_switch_key(key) && [v isKindOfClass:[NSNumber class]] && ![v boolValue])
+        return [NSNumber numberWithBool:YES];
+    return v;
+}
+
+static void TH_sw_setBool(id self, SEL _cmd, BOOL value, NSString *key) {
+    if (TH_is_switch_key(key)) value = YES;
+    ((void (*)(id, SEL, BOOL, NSString *))g_origSetBool)(self, _cmd, value, key);
+}
+
+static void TH_sw_setObject(id self, SEL _cmd, id value, NSString *key) {
+    if (TH_is_switch_key(key) && [value isKindOfClass:[NSNumber class]] && ![value boolValue])
+        value = [NSNumber numberWithBool:YES];
+    ((void (*)(id, SEL, id, NSString *))g_origSetObject)(self, _cmd, value, key);
+}
+
+static int g_swizzled = 0;
+
+static void TH_install_swizzle(void) {
+    if (g_swizzled) return;
+    Class cls = objc_getClass("NSUserDefaults");
+    if (!cls) { TH_log("NSUserDefaults class not found"); return; }
+
+    struct { const char *name; IMP *slot; } targets[4] = {
+        { "boolForKey:",    &g_origBoolForKey   },
+        { "objectForKey:",  &g_origObjectForKey },
+        { "setBool:forKey:", &g_origSetBool     },
+        { "setObject:forKey:", &g_origSetObject },
     };
-    int n = 0;
-    for (int i = 0; i < 9; i++) { setB(d, selSet, YES, (id)named[i]); n++; }
 
-    // the numeric feature switches -- this is where the cap actually lives
-    char buf[32];
-    for (int i = SEED_RANGE_FROM; i <= SEED_RANGE_TO; i++) {
-        snprintf(buf, sizeof(buf), "%d-switch", i);
-        setB(d, selSet, YES, (id)buf);
-        n++;
+    for (int i = 0; i < 4; i++) {
+        SEL sel = sel_registerName(targets[i].name);
+        Method m = class_getInstanceMethod(cls, sel);
+        if (!m) { TH_log("NSUserDefaults has no %s", targets[i].name); continue; }
+        IMP custom = (IMP)(i == 0 ? (IMP)TH_sw_boolForKey
+                           : i == 1 ? (IMP)TH_sw_objectForKey
+                           : i == 2 ? (IMP)TH_sw_setBool
+                                    : (IMP)TH_sw_setObject);
+        *(targets[i].slot) = method_getImplementation(m);
+        method_setImplementation(m, custom);
     }
-    sync(d, selSync);
-    TH_log("seeded %d switches to YES (round %d)", n, round);
+    g_swizzled = 1;
+    TH_log("NSUserDefaults swizzled (boolForKey/objectForKey/setBool/setObject)");
+}
+
+// The tweak rewrites its own flags from time to time (launch sync, menu
+// interaction, its own "max 3" rule). Every write to the defaults is a
+// signal to re-assert the YES state, so the flip is undone as soon as it
+// happens instead of waiting for the next heartbeat.
+static void TH_defaults_changed(NSNotification *note) {
+    (void)note;
+    TH_seed_switches(-1);
+}
+
+static void TH_watch_defaults(void) {
+    [[NSNotificationCenter defaultCenter]
+        addObserverForName:NSUserDefaultsDidChangeNotification
+                    object:nil
+                     queue:[NSOperationQueue mainQueue]
+                usingBlock:^(NSNotification *n) { TH_defaults_changed(n); }];
+}
+
+// Read the *stored* value, bypassing the swizzle.
+static id TH_raw_value(NSUserDefaults *d, NSString *key) {
+    if (g_origObjectForKey)
+        return ((id (*)(id, SEL, NSString *))g_origObjectForKey)(d, sel_registerName("objectForKey:"), key);
+    return [d objectForKey:key];
+}
+
+static BOOL TH_raw_is_yes(NSUserDefaults *d, NSString *key) {
+    id v = TH_raw_value(d, key);
+    if (!v) return NO;
+    if (![v isKindOfClass:[NSNumber class]]) return NO;
+    return [v boolValue];
+}
+
+// Force one key to YES. Returns YES when the stored value actually changed.
+static BOOL TH_force_yes(NSUserDefaults *d, NSString *key, BOOL createIfMissing) {
+    id v = TH_raw_value(d, key);
+    if (!v) {
+        if (!createIfMissing) return NO;
+        [d setBool:YES forKey:key];
+        return YES;
+    }
+    if ([v isKindOfClass:[NSNumber class]] && [v boolValue]) return NO;
+    [d setBool:YES forKey:key];
+    return YES;
+}
+
+// ------------------------------------------------------------ seeding
+
+static int g_seeding = 0;
+
+static void TH_seed_switches(int round) {
+    if (g_seeding) return;               // re-entrancy guard
+    g_seeding = 1;
+
+    @try {
+    @autoreleasepool {
+        NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+        if (!d) { g_seeding = 0; return; }
+
+        NSMutableArray *changed = [NSMutableArray array];
+
+        // (a) every "-switch" key that already exists in the app's domain.
+        //     Only existing keys are touched here, so features that do not
+        //     exist in this build are never invented -- inventing them could
+        //     inflate the tweak's "how many switches are on" counter.
+        NSDictionary *rep = [d dictionaryRepresentation];
+        NSMutableArray *existing = [NSMutableArray array];
+        for (NSString *k in rep) {
+            if (TH_is_switch_key(k)) [existing addObject:k];
+        }
+        for (NSString *k in existing) {
+            if (TH_force_yes(d, k, NO)) [changed addObject:k];
+        }
+
+        // (b) the 9 named switches: always materialised, even if the tweak
+        //     has not created them yet.
+        for (int i = 0; i < 9; i++) {
+            NSString *k = [NSString stringWithUTF8String:TH_NAMED_SWITCHES[i]];
+            if (TH_force_yes(d, k, YES)) [changed addObject:k];
+        }
+
+        [d synchronize];
+
+        // The tweak applies its flags when it receives its own toggle event.
+        // Re-post it so a write that happened outside the tweak's menu is
+        // picked up as well.  Only on the first rounds, and never from the
+        // change-notification path (that would feed the tweak's handler).
+        if (round >= 0 && round <= 2 && changed.count) {
+            for (NSString *k in changed) {
+                [[NSNotificationCenter defaultCenter]
+                    postNotificationName:TH_TOGGLE_NOTIFICATION
+                                  object:k
+                                userInfo:[NSDictionary dictionaryWithObject:k forKey:@"key"]];
+            }
+        }
+
+        TH_log("seed round %d: %lu existing switch key(s), %lu changed to YES",
+               round, (unsigned long)[existing count], (unsigned long)[changed count]);
+    }
+    } @catch (NSException *e) {
+        TH_log("seed aborted: %s", e.reason ? [e.reason UTF8String] : "?");
+    }
+
+    g_seeding = 0;
+}
+
+// Print the current switch state -- the fastest way to confirm on device
+// that the layer is live.
+static void TH_dump_switches(void) {
+    @try {
+    @autoreleasepool {
+        NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+        NSDictionary *rep = [d dictionaryRepresentation];
+        NSMutableArray *keys = [NSMutableArray array];
+        for (NSString *k in rep) {
+            if (TH_is_switch_key(k)) [keys addObject:k];
+        }
+        [keys sortUsingSelector:@selector(compare:)];
+        for (NSString *k in keys) {
+            id raw = TH_raw_value(d, k);
+            id live = [d objectForKey:k];
+            TH_log("switch %-34s stored=%-5s live=%-5s",
+                   [k UTF8String],
+                   [raw isKindOfClass:[NSNumber class]] ? ([raw boolValue] ? "YES" : "NO") : "-",
+                   [live isKindOfClass:[NSNumber class]] ? ([live boolValue] ? "YES" : "NO") : "-");
+        }
+        TH_log("switch dump done: %lu key(s)", (unsigned long)[keys count]);
+    }
+    } @catch (NSException *e) {
+        TH_log("dump aborted: %s", e.reason ? [e.reason UTF8String] : "?");
+    }
 }
 
 // ---------------------------------------------------------------- install
@@ -304,9 +502,9 @@ static void th_install(void) {
     if (g_installed) return;
     if (!th_base()) { TH_log("UnityFramework not mapped yet"); return; }
 #if !(GOD_MODE || ONE_HIT_KILL || INVULNERABLE_DEFENCE || MAX_ATTACK || NO_REVIVAL || NO_HEAVY_ATTACK_LOCK)
-    // No IL2CPP hooks requested: only seed NSUserDefaults switches.
+    // No IL2CPP hooks requested: only the NSUserDefaults layer.
     g_installed = 1;
-    TH_log("installed (switch seeding only)");
+    TH_log("installed (NSUserDefaults layer only)");
     return;
 #endif
     real_getIndex         = (fn_getIndex)VA(RVA_get_Index);
@@ -347,10 +545,19 @@ static void th_install(void) {
 
 __attribute__((constructor))
 static void th_ctor(void) {
+    // The swizzle goes in first so that every later read of a switch key --
+    // including the tweak's own constructor and its change handler -- already
+    // sees YES.
+    TH_install_swizzle();
+
 #if SEED_SWITCHES
-    th_seed_switches(0);
+    TH_watch_defaults();
+    TH_seed_switches(0);
+    TH_dump_switches();
 #endif
+
     th_install();
+
 #if TH_RETRY
     for (int i = 1; i <= 12 && !g_installed; i++) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(250 * i) * NSEC_PER_MSEC),
@@ -358,13 +565,23 @@ static void th_ctor(void) {
             th_install();
         });
     }
-    // re-seed on the main queue: NSUserDefaults may be reset once the app
-    // finishes its own setup, so write again shortly after launch.
-    for (int i = 1; i <= 6; i++) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1200 * i) * NSEC_PER_MSEC),
+
+    // The tweak rewrites its own flags during launch (it syncs its config
+    // with its server and restores the persisted "max 3" state). Re-seed for
+    // a while after launch to win that race, then keep a slow heartbeat.
+    for (int i = 1; i <= 60; i++) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(500 * i) * NSEC_PER_MSEC),
                        dispatch_get_main_queue(), ^{
 #if SEED_SWITCHES
-            th_seed_switches(i);
+            TH_seed_switches(i);
+#endif
+        });
+    }
+    for (int i = 1; i <= 24; i++) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5000 * i) * NSEC_PER_MSEC + 30000000000LL),
+                       dispatch_get_main_queue(), ^{
+#if SEED_SWITCHES
+            TH_seed_switches(60 + i);
 #endif
         });
     }
