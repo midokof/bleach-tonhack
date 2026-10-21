@@ -57,7 +57,6 @@
 #include <mach-o/dyld.h>
 #include <objc/runtime.h>
 #include <dispatch/dispatch.h>
-#include <dispatch/qos.h>
 
 // libSystem export; declared here because <libkern/OSCacheControl.h> is not
 // guaranteed to be present in every SDK slice.
@@ -561,7 +560,7 @@ static void th_ctor(void) {
 #if TH_RETRY
     for (int i = 1; i <= 12 && !g_installed; i++) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(250 * i) * NSEC_PER_MSEC),
-                       dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+                       dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
             th_install();
         });
     }
