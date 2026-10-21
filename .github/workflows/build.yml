@@ -18,6 +18,8 @@ jobs:
             -isysroot "$SDK" \
             -framework Foundation -framework UIKit \
             -o tonhack.dylib tonhack.m -lobjc
+          codesign -s - -f tonhack.dylib
+          codesign -dv tonhack.dylib 2>&1 | head
           file tonhack.dylib
           ls -la tonhack.dylib
       - name: Upload artifact
