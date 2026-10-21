@@ -298,7 +298,7 @@ static const char *TH_NAMED_SWITCHES[9] = {
 // Notification the tweak posts when a switch is toggled (from its binary
 // string table). Re-posting it after a write makes the tweak re-apply the
 // flags even if it only listens for its own event.
-#define TH_TOGGLE_NOTIFICATION "kItemSwitchToggled"
+#define TH_TOGGLE_NOTIFICATION @"kItemSwitchToggled"
 
 static BOOL TH_is_switch_key(id key) {
     if (!key) return NO;
